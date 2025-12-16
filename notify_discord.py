@@ -1,5 +1,7 @@
 import os, json, requests
 
+MAX_CONTENT = 1900  # กันเผื่อ
+
 def mention_text() -> str:
     parts = []
     if os.getenv("MENTION_EVERYONE", "false").lower() == "true":
@@ -9,11 +11,7 @@ def mention_text() -> str:
         parts.append(mt)
     return (" ".join(parts) + " ") if parts else ""
 
-def send_discord(items):
-    url = os.getenv("DISCORD_WEBHOOK_URL")
-    if not url:
-        raise RuntimeError("DISCORD_WEBHOOK_URL not set")
-
+def build_message(items):
     rss_url = os.getenv("RSS_URL", "")
     header = f"{mention_text()}พบรายการใหม่ใน RSS"
     if rss_url:
@@ -21,17 +19,35 @@ def send_discord(items):
 
     lines = []
     for it in items:
-        title = it.get("title", "").strip() or "(ไม่มีชื่อ)"
-        link = it.get("link", "").strip()
-        when = it.get("published_at", "")
-        line = f"• {title} — {when}"
+        title = (it.get("title") or "").strip() or "(ไม่มีชื่อ)"
+        link = (it.get("link") or "").strip()
+        when = it.get("published_at") or ""
+        line = f"• {title}"
+        if when:
+            line += f" — {when}"
         if link:
             line += f"\n  {link}"
         lines.append(line)
 
     content = header + "\n\n" + "\n\n".join(lines)
+    # จำกัดความยาวไม่ให้เกิน 2000 ตัวอักษร
+    if len(content) > MAX_CONTENT:
+        content = content[:MAX_CONTENT] + "\n… (ตัดข้อความเพื่อไม่ให้เกินลิมิต)"
+    return content
+
+def send_discord(items):
+    url = os.getenv("DISCORD_WEBHOOK_URL")
+    if not url:
+        raise RuntimeError("DISCORD_WEBHOOK_URL not set")
+
+    content = build_message(items).strip()
+    if not content:
+        raise RuntimeError("Empty content for Discord")
+
     resp = requests.post(url, json={"content": content}, timeout=20)
-    resp.raise_for_status()
+    if not resp.ok:
+        # โชว์ข้อความผิดพลาดจาก Discord เพื่อดีบั๊ก
+        raise requests.HTTPError(f"{resp.status_code} {resp.reason}: {resp.text}", response=resp)
 
 def main():
     path = "new_items.json"
