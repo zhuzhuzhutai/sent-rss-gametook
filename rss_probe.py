@@ -49,18 +49,26 @@ def entry_timestamp(e) -> float:
     for key in ("published_parsed", "updated_parsed", "created_parsed"):
         t = getattr(e, key, None)
         if t:
-            return calendar.timegm(t)  # feedparser คืนเป็น UTC
+            return calendar.timegm(t)  # feedparser ให้เป็น UTC
     return time.time()
 
 def entry_to_dict(e, ts: float, fp: str) -> dict:
     thai = timezone(timedelta(hours=7))
+    # เก็บ raw summary ไว้เผื่อ notify จะไป strip HTML เอง
+    summary = getattr(e, "summary", "") or ""
     return {
         "fingerprint": fp,
         "title": getattr(e, "title", "") or "",
         "link": getattr(e, "link", "") or "",
-        "summary": getattr(e, "summary", "") or "",
+        "summary": summary,
         "published_ts": ts,
         "published_at": datetime.fromtimestamp(ts, tz=thai).isoformat(),
+        # แนบฟิลด์เสริมเผื่อบางฟีด
+        "media_thumbnail": getattr(e, "media_thumbnail", None),
+        "media_content": getattr(e, "media_content", None),
+        "enclosures": getattr(e, "enclosures", None),
+        "description": getattr(e, "description", None),
+        "content": getattr(e, "content", None),
     }
 
 async def main() -> int:
@@ -83,17 +91,14 @@ async def main() -> int:
     async with aiohttp.ClientSession() as session:
         async with session.get(RSS_URL, headers=headers, timeout=25) as resp:
             if resp.status == 304:
-                # ไม่มีการอัปเดตที่ฝั่งเซิร์ฟเวอร์
                 thai = timezone(timedelta(hours=7))
                 state["checked_at"] = datetime.now(timezone.utc).astimezone(thai).isoformat()
                 save_state(state)
-                # ล้างไฟล์ new_items ถ้ามี
                 if os.path.exists(NEW_FILE):
                     os.remove(NEW_FILE)
                 return 1
             resp.raise_for_status()
             raw = await resp.read()
-            # อัปเดต state จาก headers
             if resp.headers.get("ETag"):
                 state["etag"] = resp.headers["ETag"]
             if resp.headers.get("Last-Modified"):
@@ -109,45 +114,39 @@ async def main() -> int:
             os.remove(NEW_FILE)
         return 1
 
-    # สร้างรายการ พร้อม fingerprint
     items = []
     for e in feed.entries:
         ts = entry_timestamp(e)
         fp = fingerprint(e)
         items.append((ts, e, fp))
 
-    # sort ล่าสุดก่อน และเลือกบนสุด 10 (เพิ่มจาก 5 เพื่อกันตกหล่น)
+    # เลือกบนสุด 10 กันตกหล่น ปรับได้ตามถี่ของฟีด
     items.sort(key=lambda x: x[0], reverse=True)
     topN = items[:10]
-
     if topN:
         latest_ts = topN[0][0]
         state["last_pubdate"] = datetime.fromtimestamp(latest_ts, tz=thai_tz).isoformat()
 
-    # หาเฉพาะรายการที่ยังไม่เคยเห็น
     new_entries = []
     for ts, e, fp in topN:
         if fp not in seen:
             new_entries.append(entry_to_dict(e, ts, fp))
 
-    # อัปเดตไฟล์ state
     save_state(state)
 
     if not new_entries:
-        # ไม่มีใหม่ ล้างไฟล์ new_items (ถ้ามี)
         if os.path.exists(NEW_FILE):
             os.remove(NEW_FILE)
         return 1
 
-    # มีใหม่: เขียนไฟล์ new_items.json และอัปเดต seen.json
+    # เขียนรายการใหม่ทั้งหมด
     with open(NEW_FILE, "w", encoding="utf-8") as f:
         json.dump(new_entries, f, indent=2, ensure_ascii=False)
 
-    # เพิ่ม fingerprint ใหม่เข้า seen และบันทึก
+    # มาร์คว่าเห็นแล้วทั้งหมด เพื่อกันส่งซ้ำรอบหน้า
     for it in new_entries:
         seen.add(it["fingerprint"])
     save_seen(seen)
-
     return 0
 
 if __name__ == "__main__":
