@@ -1,112 +1,108 @@
 import os, json, re, html, requests
-from datetime import datetime, timezone, timedelta
 
-MAX_DESC = 380  # ความยาวคำอธิบายต่อการ์ด
-BATCH_SIZE = 10 # Discord จำกัด embeds ต่อข้อความไม่เกิน 10
+MAX_DESC = 220   # คำอธิบายสั้น กระชับ
+BATCH_SIZE = 10  # Discord จำกัด embeds ต่อข้อความ
 
 IMG_TAG_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+TAG_RE = re.compile(r"<[^>]+>")  # ลบแท็กทั้งหมด
 
-def thai_iso(ts_str: str | None) -> str | None:
-    # ts_str รูปแบบ ISO จาก rss_probe.py อยู่ใน Asia/Bangkok อยู่แล้ว ใช้ตรงๆได้
-    return ts_str or None
+def strip_html(text: str) -> str:
+    if not text:
+        return ""
+    # แทน br/p ด้วยขึ้นบรรทัด ก่อนลบแท็กอื่น
+    text = re.sub(r"<\s*(br|/p)\s*>", "\n", text, flags=re.IGNORECASE)
+    text = TAG_RE.sub("", text)              # ลบแท็ก
+    text = html.unescape(text)               # แปลง entity
+    text = re.sub(r"\s+\n", "\n", text)      # เก็บบรรทัดโล่งให้น้อยลง
+    text = re.sub(r"[ \t]{2,}", " ", text)   # ช่องว่างซ้ำ
+    return text.strip()
 
-def extract_image(it: dict) -> str | None:
-    # 1) ฟิลด์ที่มักมีจาก feedparser
-    for key in ("media_thumbnail", "media_content"):
-        v = it.get(key)
+def safe(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit-1] + "…"
+
+def extract_image_from_html(s: str | None) -> str | None:
+    if not s:
+        return None
+    m = IMG_TAG_RE.search(s)
+    return m.group(1) if m else None
+
+def pick_image(it: dict) -> str | None:
+    # media_thumbnail/media_content
+    for k in ("media_thumbnail", "media_content"):
+        v = it.get(k)
         if isinstance(v, list) and v:
             url = v[0].get("url")
             if url: return url
         if isinstance(v, dict):
             url = v.get("url")
             if url: return url
-    # 2) enclosure (บางฟีดใส่ภาพเป็น enclosure type=image/*)
-    encl = it.get("enclosures") or it.get("enclosure")
-    if isinstance(encl, list) and encl:
-        for e in encl:
+    # enclosure(s)
+    enc = it.get("enclosures") or it.get("enclosure")
+    if isinstance(enc, list):
+        for e in enc:
             if isinstance(e, dict) and str(e.get("type","")).startswith("image/"):
-                if e.get("href"): return e["href"]
-                if e.get("url"):  return e["url"]
-    elif isinstance(encl, dict):
-        if str(encl.get("type","")).startswith("image/"):
-            return encl.get("href") or encl.get("url")
-
-    # 3) summary/detail ที่มี <img src="...">
-    for key in ("summary", "summary_detail", "content", "description"):
-        v = it.get(key)
-        if isinstance(v, dict):
-            v = v.get("value")
+                return e.get("href") or e.get("url")
+    elif isinstance(enc, dict):
+        if str(enc.get("type","")).startswith("image/"):
+            return enc.get("href") or enc.get("url")
+    # จาก summary/content ที่มี <img>
+    for k in ("summary", "description", "content"):
+        v = it.get(k)
         if isinstance(v, list) and v:
-            # content เป็น list ของบล็อก HTML
             for c in v:
-                if isinstance(c, dict):
-                    html_text = c.get("value") or ""
-                else:
-                    html_text = str(c)
-                m = IMG_TAG_RE.search(html_text or "")
-                if m:
-                    return m.group(1)
+                html_text = c.get("value") if isinstance(c, dict) else str(c)
+                url = extract_image_from_html(html_text)
+                if url: return url
+        elif isinstance(v, dict):
+            url = extract_image_from_html(v.get("value"))
+            if url: return url
         elif isinstance(v, str):
-            m = IMG_TAG_RE.search(v)
-            if m:
-                return m.group(1)
-
-    # 4) เผื่อมีฟิลด์ image โดยตรง
-    if isinstance(it.get("image"), dict):
-        url = it["image"].get("href") or it["image"].get("url")
-        if url: return url
-
+            url = extract_image_from_html(v)
+            if url: return url
     return None
-
-def safe_trim(text: str, limit: int) -> str:
-    text = html.unescape(text or "")
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit-1] + "…"
 
 def build_embeds(items: list[dict]) -> list[dict]:
     embeds = []
     for it in items:
-        title = it.get("title") or "(ไม่มีชื่อ)"
+        title = safe(it.get("title") or "(ไม่มีชื่อ)", 240)
         url = it.get("link") or None
-        desc_raw = it.get("summary") or ""
-        description = safe_trim(desc_raw, MAX_DESC) if desc_raw else None
-        ts = thai_iso(it.get("published_at"))
-        img = extract_image(it)
+        # ใช้ summary/description/content เป็นข้อความล้วน
+        raw = it.get("summary") or it.get("description") or ""
+        if isinstance(raw, list):  # บางฟีดให้ list ของบล็อก HTML
+            raw = raw[0].get("value") if raw and isinstance(raw[0], dict) else str(raw[0])
+        elif isinstance(raw, dict):
+            raw = raw.get("value") or ""
+        description = safe(strip_html(raw), MAX_DESC) or None
+        ts = it.get("published_at") or None
+        img = pick_image(it)
 
         embed = {
-            "title": safe_trim(title, 240),
+            "title": title,
             "url": url,
             "description": description,
             "timestamp": ts,
-            "color": 0x5865F2,  # Blurple
+            "color": 0x2ECC71,  # เขียวอ่อนอ่านง่าย
         }
         if img:
             embed["image"] = {"url": img}
-
-        # ลบคีย์ที่เป็น None เพื่อไม่ให้ payload เกะกะ
-        embed = {k: v for k, v in embed.items() if v is not None}
-        embeds.append(embed)
+        # ลบ None
+        embeds.append({k: v for k, v in embed.items() if v is not None})
     return embeds
 
-def post_discord(embeds_batch: list[dict]) -> None:
+def post_batch(embeds_batch: list[dict]) -> None:
     url = os.getenv("DISCORD_WEBHOOK_URL")
     if not url:
         raise RuntimeError("DISCORD_WEBHOOK_URL not set")
     rss_url = os.getenv("RSS_URL", "")
-    header = f"พบรายการใหม่ใน RSS: {rss_url}" if rss_url else "พบรายการใหม่ใน RSS"
-    payload = {
-        "content": header,
-        "embeds": embeds_batch,
-        "allowed_mentions": {
-            "parse": ["everyone", "roles", "users"] if os.getenv("MENTION_EVERYONE","false").lower()=="true" else [],
-        },
-    }
-    mention_target = os.getenv("MENTION_TARGET", "").strip()
-    if mention_target:
-        payload["content"] = f"{mention_target} " + payload["content"]
+    content = f"พบรายการใหม่ใน RSS: {rss_url}" if rss_url else "พบรายการใหม่ใน RSS"
+    mention = os.getenv("MENTION_TARGET", "").strip()
+    if os.getenv("MENTION_EVERYONE","false").lower() == "true":
+        mention = ("@everyone " + mention).strip()
+    if mention:
+        content = f"{mention} {content}"
 
+    payload = {"content": content, "embeds": embeds_batch}
     r = requests.post(url, json=payload, timeout=25)
     if not r.ok:
         raise requests.HTTPError(f"{r.status_code} {r.reason}: {r.text}", response=r)
@@ -123,11 +119,9 @@ def main():
         return 0
 
     embeds = build_embeds(items)
-    # ส่งเป็นชุด ชุดละไม่เกิน 10 embeds
     for i in range(0, len(embeds), BATCH_SIZE):
-        batch = embeds[i:i+BATCH_SIZE]
-        post_discord(batch)
-    print(f"Sent {len(embeds)} embed(s) to Discord.")
+        post_batch(embeds[i:i+BATCH_SIZE])
+    print(f"Sent {len(embeds)} embeds.")
     return 0
 
 if __name__ == "__main__":
