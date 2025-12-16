@@ -2,17 +2,17 @@ name: RSS Notify
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # ทุก 10 นาที ปรับได้
-  workflow_dispatch: {}
+    - cron: "*/10 * * * *"   # รันทุก 10 นาที (ปรับได้)
+  workflow_dispatch: {}      # กดรันมือได้
 
 jobs:
   probe:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # commit state/seen/new_items
+      contents: write   # ต้องใช้เพื่อ commit state files
     env:
       TZ: "Asia/Bangkok"
-      # mention ตั้งค่าตามต้องการ (ถ้าไม่ใช้ให้ปล่อยว่าง/false)
+      # ตั้งค่า mention ถ้าไม่ใช้ ให้เว้นค่าว่าง/false
       MENTION_EVERYONE: "false"
       MENTION_TARGET: "<@279966568023326720>"   # เช่น "<@123456789012345678>" หรือ "<@&ROLE_ID>"
     steps:
@@ -25,12 +25,12 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Export env (RSS_URL)
+      - name: Export RSS_URL
         run: echo "RSS_URL=${{ vars.RSS_URL }}" >> $GITHUB_ENV
 
       - name: Run probe
@@ -38,22 +38,19 @@ jobs:
         env:
           RSS_URL: ${{ env.RSS_URL }}
         run: |
-          set +e
+          set -e
           python rss_probe.py
-          echo "exit_code=$?" >> $GITHUB_OUTPUT
-          exit 0
-
-      - name: Commit state files (if changed)
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add seen.json feed_state.json new_items.json 2>/dev/null || true
-          git diff --staged --quiet || git commit -m "Update RSS state [skip ci]"
-          git push
+          # ตั้ง flag ว่ามีไฟล์ new_items.json ไหม
+          if [ -f new_items.json ]; then
+            echo "has_new=true" >> $GITHUB_OUTPUT
+            echo "Found new_items.json"
+          else
+            echo "has_new=false" >> $GITHUB_OUTPUT
+            echo "No new items"
+          fi
 
       - name: Notify Discord if new items
-        if: steps.probe.outputs.exit_code == '0'
+        if: steps.probe.outputs.has_new == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           RSS_URL: ${{ env.RSS_URL }}
@@ -61,3 +58,19 @@ jobs:
           MENTION_TARGET: ${{ env.MENTION_TARGET }}
         run: |
           python notify_discord.py
+
+      # ถ้าไม่อยากเก็บ new_items.json ไว้ใน repo ให้ลบหลังส่งแจ้งเตือนเสร็จ
+      # แล้วค่อย commit เฉพาะ seen.json, feed_state.json
+      # หากอยากเก็บไว้ ให้คอมเมนต์ขั้นตอน Cleanup นี้ออก
+      - name: Cleanup new_items (optional)
+        if: steps.probe.outputs.has_new == 'true'
+        run: rm -f new_items.json || true
+
+      - name: Commit state files (after notify)
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen.json feed_state.json new_items.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "Update RSS state [skip ci]"
+          git push
