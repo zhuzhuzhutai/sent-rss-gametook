@@ -1,7 +1,6 @@
 import os, json, re, html, requests
 
-MAX_LINE = 300  # จำกัดความยาวต่อรายการ เพื่อไม่ให้เกินลิมิต Discord
-
+MAX_LINE = 300  # จำกัดความยาวคำอธิบายต่อรายการ
 TAG_RE = re.compile(r"<[^>]+>")
 IMG_TAG_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
 
@@ -22,16 +21,13 @@ def first_image_url(s: str | None) -> str | None:
     return m.group(1) if m else None
 
 def build_message(items):
-    rss_url = os.getenv("RSS_URL", "")
+    parts = []
     mention = os.getenv("MENTION_TARGET", "").strip()
     if os.getenv("MENTION_EVERYONE", "false").lower() == "true":
         mention = ("@everyone " + mention).strip()
-
-    header = f"พบรายการใหม่ใน RSS: {rss_url}" if rss_url else "พบรายการใหม่ใน RSS"
     if mention:
-        header = f"{mention} {header}"
+        parts.append(mention)
 
-    lines = [header, ""]
     for it in items:
         title = (it.get("title") or "(ไม่มีชื่อ)").strip()
         link = (it.get("link") or "").strip()
@@ -44,23 +40,22 @@ def build_message(items):
         if len(text) > MAX_LINE:
             text = text[:MAX_LINE-1] + "…"
 
-        # รูป: แทรกไว้ท้ายบรรทัดเป็น URL (ถ้าอยากให้ดึง og:image ต้องเพิ่ม HTTP fetch ซึ่งเสี่ยง rate)
-        img = first_image_url(raw)
-        bullet = f"• {title}"
+        line = f"• {title}"
         if link:
-            bullet += f"\n  {link}"
+            line += f"\n  {link}"
         if text:
-            bullet += f"\n  {text}"
-        if img:
-            bullet += f"\n  [image] {img}"
+            line += f"\n  {text}"
 
-        lines.append(bullet)
-        lines.append("")
+        # ถ้าอยากแสดงลิงก์รูป (ไม่ embed) ให้เปิดสองบรรทัดข้างล่างนี้
+        # img = first_image_url(raw)
+        # if img: line += f"\n  [image] {img}"
 
-    content = "\n".join(lines).strip()
-    # กันไม่ให้เกิน 2000 ตัวอักษร
-    if len(content) > 1900:
-        content = content[:1900] + "\n… (ตัดให้ไม่เกินลิมิต Discord)"
+        parts.append(line)
+        parts.append("")  # เว้นบรรทัด
+
+    content = "\n".join(parts).strip()
+    if len(content) > 1900:  # กันลิมิต 2000 ตัวอักษร
+        content = content[:1900] + "\n…"
     return content
 
 def main():
