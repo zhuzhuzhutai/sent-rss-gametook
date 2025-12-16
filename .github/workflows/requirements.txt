@@ -1,4 +1,0 @@
-aiohttp
-feedparser
-python-dotenv
-requests
